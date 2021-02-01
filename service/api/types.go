@@ -44,6 +44,11 @@ type DebuggerState struct {
 	When string
 	// Filled by RPCClient.Continue, indicates an error
 	Err error `json:"-"`
+
+	// StopReason returns the reason the reason why the target process is stopped.
+	// A process could be stopped for multiple simultaneous reasons, in which
+	// case only one will be reported.
+	StopReason string `json:"stopReason"`
 }
 
 // Breakpoint addresses a set of locations at which process execution may be

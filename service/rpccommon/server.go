@@ -95,8 +95,8 @@ func (s *ServerImpl) Stop() error {
 }
 
 // Run starts a debugger and exposes it with an HTTP server. The debugger
-// itself can be stopped with the `detach` API. Run blocks until the HTTP
-// server stops.
+// itself can be stopped with the `detach` API. Run starts a listener
+// goroutine that will run until Stop is called.
 func (s *ServerImpl) Run() error {
 	var err error
 

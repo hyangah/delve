@@ -595,6 +595,7 @@ func (d *Debugger) state(retLoadCfg *proc.LoadConfig) (*api.DebuggerState, error
 		state.When, _ = d.target.When()
 	}
 
+	state.StopReason = d.target.StopReason.String()
 	return state, nil
 }
 
