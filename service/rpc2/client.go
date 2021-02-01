@@ -472,6 +472,12 @@ func (c *RPCClient) CoreDumpCancel() error {
 	return c.call("DumpCancel", DumpCancelIn{}, out)
 }
 
+func (c *RPCClient) CurrentPackage() (string, error) {
+	var out CurrentPackageOut
+	err := c.call("CurrentPackage", RecordedIn{}, &out)
+	return out.Name, err
+}
+
 func (c *RPCClient) call(method string, args, reply interface{}) error {
 	return c.client.Call("RPCServer."+method, args, reply)
 }

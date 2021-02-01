@@ -379,6 +379,22 @@ func (s *RPCServer) ListPackageVars(arg ListPackageVarsIn, out *ListPackageVarsO
 	return nil
 }
 
+type CurrentPackageIn struct {
+}
+
+type CurrentPackageOut struct {
+	Name string
+}
+
+func (s *RPCServer) CurrentPackage(arg CurrentPackageIn, out *CurrentPackageOut) error {
+	name, err := s.debugger.CurrentPackage()
+	if err != nil {
+		return err
+	}
+	out.Name = name
+	return nil
+}
+
 type ListRegistersIn struct {
 	ThreadID  int
 	IncludeFp bool
