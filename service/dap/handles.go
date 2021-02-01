@@ -1,6 +1,8 @@
 package dap
 
-import "github.com/go-delve/delve/pkg/proc"
+import (
+	"github.com/go-delve/delve/service/api"
+)
 
 const startHandle = 1000
 
@@ -15,7 +17,7 @@ type handlesMap struct {
 }
 
 type fullyQualifiedVariable struct {
-	*proc.Variable
+	api.Variable
 	// A way to load this variable by either using all names in the hierarchic
 	// sequence above this variable (most readable when referenced by the UI)
 	// if available or a special expression based on:
