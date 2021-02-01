@@ -1279,7 +1279,7 @@ func TestScopesAndVariablesRequests2(t *testing.T) {
 	})
 }
 
-// TestVariablesLoading exposes test cases where variables might be partiall or
+// TestVariablesLoading exposes test cases where variables might be partial or
 // fully unloaded.
 func TestVariablesLoading(t *testing.T) {
 	runTest(t, "testvariables2", func(client *daptest.Client, fixture protest.Fixture) {

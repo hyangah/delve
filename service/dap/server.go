@@ -12,9 +12,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"go/constant"
 	"io"
 	"net"
+	"net/rpc"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -26,7 +26,8 @@ import (
 	"github.com/go-delve/delve/pkg/proc"
 	"github.com/go-delve/delve/service"
 	"github.com/go-delve/delve/service/api"
-	"github.com/go-delve/delve/service/debugger"
+	"github.com/go-delve/delve/service/rpc2"
+	"github.com/go-delve/delve/service/rpccommon"
 	"github.com/google/go-dap"
 	"github.com/sirupsen/logrus"
 )
@@ -52,8 +53,6 @@ type Server struct {
 	stopChan chan struct{}
 	// reader is used to read requests from the connection.
 	reader *bufio.Reader
-	// debugger is the underlying debugger service.
-	debugger *debugger.Debugger
 	// log is used for structured logging.
 	log *logrus.Entry
 	// binaryToRemove is the compiled binary to be removed on disconnect.
@@ -67,6 +66,35 @@ type Server struct {
 	variableHandles *variablesHandlesMap
 	// args tracks special settings for handling debug session requests.
 	args launchAttachArgs
+
+	// session is the connection to the headless debugger
+	// created by a launch/attach request.
+	session *Session
+}
+
+// Session encapsulates
+type Session struct {
+	// In-memory
+	listener   net.Listener
+	clientConn net.Conn
+	server     *rpccommon.ServerImpl
+	client     *rpc2.RPCClient
+}
+
+// Close closes the session.
+func (session *Session) Close() {
+	if session.clientConn != nil {
+		session.clientConn.Close()
+		session.clientConn = nil
+	}
+	if session.server != nil {
+		session.server.Stop()
+		session.server = nil
+	}
+	if session.listener != nil {
+		session.listener.Close()
+		session.listener = nil
+	}
 }
 
 // launchAttachArgs captures arguments from launch/attach request that
@@ -90,7 +118,7 @@ var defaultArgs = launchAttachArgs{
 // DefaultLoadConfig controls how variables are loaded from the target's memory, borrowing the
 // default value from the original vscode-go debug adapter and rpc server.
 // TODO(polina): Support setting config via launch/attach args or only rely on on-demand loading?
-var DefaultLoadConfig = proc.LoadConfig{
+var DefaultLoadConfig = api.LoadConfig{
 	FollowPointers:     true,
 	MaxVariableRecurse: 1,
 	MaxStringLen:       64,
@@ -148,11 +176,13 @@ func (s *Server) Stop() {
 		// allowing the run goroutine to exit.
 		s.conn.Close()
 	}
-	if s.debugger != nil {
+	if s.session != nil {
 		kill := s.config.Debugger.AttachPid == 0
-		if err := s.debugger.Detach(kill); err != nil {
+		if err := s.session.client.Detach(kill); err != nil {
 			s.log.Error(err)
 		}
+		s.session.Close()
+		s.session = nil
 	}
 }
 
@@ -520,17 +550,17 @@ func (s *Server) onLaunchRequest(request *dap.LaunchRequest) {
 	s.config.ProcessArgs = append([]string{program}, targetArgs...)
 	s.config.Debugger.WorkingDir = filepath.Dir(program)
 
-	var err error
-	if s.debugger, err = debugger.New(&s.config.Debugger, s.config.ProcessArgs); err != nil {
-		s.sendErrorResponse(request.Request,
-			FailedToLaunch, "Failed to launch", err.Error())
+	session, err := newSession("", s.config)
+	if err != nil {
+		s.sendErrorResponse(request.Request, FailedToLaunch, "Failed to launch", err.Error())
 		return
 	}
+	s.session = session
 
 	// Notify the client that the debugger is ready to start accepting
 	// configuration requests for setting breakpoints, etc. The client
 	// will end the configuration sequence with 'configurationDone'.
-	s.send(&dap.InitializedEvent{Event: *newEvent("initialized")})
+	s.send(&dap.InitializedEvent{Event: *newEvent("initialized")}) /// TODO
 	s.send(&dap.LaunchResponse{Response: *newResponse(request.Request)})
 }
 
@@ -538,9 +568,8 @@ func (s *Server) onLaunchRequest(request *dap.LaunchRequest) {
 // it disconnects the debuggee and signals that the debug adaptor
 // (in our case this TCP server) can be terminated.
 func (s *Server) onDisconnectRequest(request *dap.DisconnectRequest) {
-	s.send(&dap.DisconnectResponse{Response: *newResponse(request.Request)})
-	if s.debugger != nil {
-		_, err := s.debugger.Command(&api.DebuggerCommand{Name: api.Halt})
+	if s.session != nil {
+		_, err := s.session.client.Halt() // TODO: state isn't useful?
 		if err != nil {
 			s.log.Error(err)
 		}
@@ -552,11 +581,13 @@ func (s *Server) onDisconnectRequest(request *dap.DisconnectRequest) {
 		if request.Arguments.TerminateDebuggee {
 			kill = true
 		}
-		err = s.debugger.Detach(kill)
-		if err != nil {
+		if err := s.session.client.Detach(kill); err != nil {
 			s.log.Error(err)
 		}
 	}
+
+	s.send(&dap.DisconnectResponse{Response: *newResponse(request.Request)})
+
 	// TODO(polina): make thread-safe when handlers become asynchronous.
 	s.signalDisconnect()
 }
@@ -581,7 +612,11 @@ func (s *Server) onSetBreakpointsRequest(request *dap.SetBreakpointsRequest) {
 	// -- doesn't exist and in request => SetBreakpoint
 
 	// Clear all existing breakpoints in the file.
-	existing := s.debugger.Breakpoints()
+	existing, err := s.session.client.ListBreakpoints()
+	if err != nil {
+		// TODO: what kind of error is this?
+		s.log.Error(fmt.Sprintf("failed to listbreakpoints: %v", err))
+	}
 	for _, bp := range existing {
 		// Skip special breakpoints such as for panic.
 		if bp.ID < 0 {
@@ -592,8 +627,7 @@ func (s *Server) onSetBreakpointsRequest(request *dap.SetBreakpointsRequest) {
 		if bp.File != request.Arguments.Source.Path {
 			continue
 		}
-		_, err := s.debugger.ClearBreakpoint(bp)
-		if err != nil {
+		if _, err := s.session.client.ClearBreakpoint(bp.ID); err != nil {
 			s.sendErrorResponse(request.Request, UnableToSetBreakpoints, "Unable to set or clear breakpoints", err.Error())
 			return
 		}
@@ -603,7 +637,7 @@ func (s *Server) onSetBreakpointsRequest(request *dap.SetBreakpointsRequest) {
 	response := &dap.SetBreakpointsResponse{Response: *newResponse(request.Request)}
 	response.Body.Breakpoints = make([]dap.Breakpoint, len(request.Arguments.Breakpoints))
 	for i, want := range request.Arguments.Breakpoints {
-		got, err := s.debugger.CreateBreakpoint(
+		got, err := s.session.client.CreateBreakpoint(
 			&api.Breakpoint{File: request.Arguments.Source.Path, Line: want.Line, Cond: want.Condition})
 		response.Body.Breakpoints[i].Verified = (err == nil)
 		if err != nil {
@@ -645,26 +679,35 @@ func (s *Server) onContinueRequest(request *dap.ContinueRequest) {
 	s.doCommand(api.Continue)
 }
 
-func fnName(loc *proc.Location) string {
-	if loc.Fn == nil {
+func fnName(loc api.Location) string {
+	if loc.Function == nil {
 		return "???"
 	}
-	return loc.Fn.Name
+	return loc.Function.Name()
+}
+
+func isProgramExitedError(err error) bool {
+	switch err.(type) {
+	case rpc.ServerError:
+		// Unfortunately, net/rpc.ServerError is not a structured error but a string,
+		// so use string matching to check if the error was due to the program exited already.
+		return strings.Contains(err.Error(), "has exited with status")
+	}
+	return false
 }
 
 func (s *Server) onThreadsRequest(request *dap.ThreadsRequest) {
-	if s.debugger == nil {
+	if s.session == nil {
 		s.sendErrorResponse(request.Request, UnableToDisplayThreads, "Unable to display threads", "debugger is nil")
 		return
 	}
-	gs, _, err := s.debugger.Goroutines(0, 0)
+	gs, _, err := s.session.client.ListGoroutines(0, 0)
 	if err != nil {
-		switch err.(type) {
-		case *proc.ErrProcessExited:
+		if isProgramExitedError(err) {
 			// If the program exits very quickly, the initial threads request will complete after it has exited.
 			// A TerminatedEvent has already been sent. Ignore the err returned in this case.
 			s.send(&dap.ThreadsResponse{Response: *newResponse(request.Request)})
-		default:
+		} else {
 			s.sendErrorResponse(request.Request, UnableToDisplayThreads, "Unable to display threads", err.Error())
 		}
 		return
@@ -679,13 +722,20 @@ func (s *Server) onThreadsRequest(request *dap.ThreadsRequest) {
 		// (dummy) thread".
 		threads = []dap.Thread{{Id: 1, Name: "Dummy"}}
 	} else {
-		state, err := s.debugger.State( /*nowait*/ true)
+		state, err := s.session.client.GetStateNonBlocking()
 		if err != nil {
-			s.sendErrorResponse(request.Request, UnableToDisplayThreads, "Unable to display threads", err.Error())
+			if isProgramExitedError(err) || state.Exited {
+				s.send(&dap.ThreadsResponse{Response: *newResponse(request.Request)})
+			} else {
+				s.sendErrorResponse(request.Request, UnableToDisplayThreads, "Unable to display threads", err.Error())
+			}
 			return
 		}
-		s.debugger.LockTarget()
-		defer s.debugger.UnlockTarget()
+		if state.Exited {
+			// program exited.
+			s.send(&dap.ThreadsResponse{Response: *newResponse(request.Request)})
+			return
+		}
 
 		for i, g := range gs {
 			selected := ""
@@ -693,13 +743,13 @@ func (s *Server) onThreadsRequest(request *dap.ThreadsRequest) {
 				selected = "* "
 			}
 			thread := ""
-			if g.Thread != nil && g.Thread.ThreadID() != 0 {
-				thread = fmt.Sprintf(" (Thread %d)", g.Thread.ThreadID())
+			if g.ThreadID != 0 {
+				thread = fmt.Sprintf(" (Thread %d)", g.ThreadID)
 			}
 			// File name and line number are communicated via `stackTrace`
 			// so no need to include them here.
-			loc := g.UserCurrent()
-			threads[i].Name = fmt.Sprintf("%s[Go %d] %s%s", selected, g.ID, fnName(&loc), thread)
+			loc := g.UserCurrentLoc
+			threads[i].Name = fmt.Sprintf("%s[Go %d] %s%s", selected, g.ID, fnName(loc), thread)
 			threads[i].Id = g.ID
 		}
 	}
@@ -727,12 +777,6 @@ func (s *Server) onAttachRequest(request *dap.AttachRequest) {
 		}
 		s.config.Debugger.AttachPid = int(pid)
 		s.setLaunchAttachArgs(request)
-		var err error
-		if s.debugger, err = debugger.New(&s.config.Debugger, nil); err != nil {
-			s.sendErrorResponse(request.Request,
-				FailedToAttach, "Failed to attach", err.Error())
-			return
-		}
 	} else {
 		// TODO(polina): support 'remote' mode with 'host' and 'port'
 		s.sendErrorResponse(request.Request,
@@ -740,11 +784,52 @@ func (s *Server) onAttachRequest(request *dap.AttachRequest) {
 			fmt.Sprintf("Unsupported 'mode' value %q in debug configuration", mode))
 		return
 	}
+
+	session, err := newSession("", s.config)
+	if err != nil {
+		s.sendErrorResponse(request.Request, FailedToAttach, "Failed to attach", err.Error())
+		return
+	}
+	s.session = session
+
 	// Notify the client that the debugger is ready to start accepting
 	// configuration requests for setting breakpoints, etc. The client
 	// will end the configuration sequence with 'configurationDone'.
 	s.send(&dap.InitializedEvent{Event: *newEvent("initialized")})
 	s.send(&dap.AttachResponse{Response: *newResponse(request.Request)})
+}
+
+func newSession(addr string, cfg *service.Config) (*Session, error) {
+	if addr != "" {
+		return nil, fmt.Errorf("remote attach mode is not implemented")
+		// TODO: client = rpc2.NewClient(addr)
+	}
+
+	// If addr == "", set up a local server for the delve JSON API serving.
+	var localServerCfg service.Config
+	if cfg != nil {
+		localServerCfg = *cfg // narrow copy to inherit other settings.
+	}
+
+	listener, clientConn := service.ListenerPipe()
+	localServerCfg.Listener = listener
+	localServerCfg.DisconnectChan = make(chan struct{})
+	localServerCfg.APIVersion = 2
+	server := rpccommon.NewServer(&localServerCfg)
+	if err := server.Run(); err != nil {
+		return nil, err
+	}
+
+	// TODO: accept config.Config, like in connect of cmds/commands.go?
+	client := rpc2.NewClientFromConn(clientConn)
+	client.SetReturnValuesLoadConfig(apiCfg)
+
+	return &Session{
+		listener:   listener,
+		clientConn: clientConn,
+		server:     server,
+		client:     client,
+	}, nil
 }
 
 // onNextRequest handles 'next' request.
@@ -791,7 +876,7 @@ type stackFrame struct {
 // This is a mandatory request to support.
 func (s *Server) onStackTraceRequest(request *dap.StackTraceRequest) {
 	goroutineID := request.Arguments.ThreadId
-	frames, err := s.debugger.Stacktrace(goroutineID, s.args.stackTraceDepth, 0)
+	frames, err := s.session.client.Stacktrace(goroutineID, s.args.stackTraceDepth, 0, apiCfg)
 	if err != nil {
 		s.sendErrorResponse(request.Request, UnableToProduceStackTrace, "Unable to produce stack trace", err.Error())
 		return
@@ -799,7 +884,7 @@ func (s *Server) onStackTraceRequest(request *dap.StackTraceRequest) {
 
 	stackFrames := make([]dap.StackFrame, len(frames))
 	for i, frame := range frames {
-		loc := &frame.Call
+		loc := frame.Location
 		uniqueStackFrameID := s.stackFrameHandles.create(stackFrame{goroutineID, i})
 		stackFrames[i] = dap.StackFrame{Id: uniqueStackFrameID, Line: loc.Line, Name: fnName(loc)}
 		if loc.File != "<autogenerated>" {
@@ -838,20 +923,20 @@ func (s *Server) onScopesRequest(request *dap.ScopesRequest) {
 	frame := sf.(stackFrame).frameIndex
 
 	// Retrieve arguments
-	args, err := s.debugger.FunctionArguments(goid, frame, 0, DefaultLoadConfig)
+	args, err := s.session.client.ListFunctionArgs(api.EvalScope{GoroutineID: goid, Frame: frame}, DefaultLoadConfig)
 	if err != nil {
 		s.sendErrorResponse(request.Request, UnableToListArgs, "Unable to list args", err.Error())
 		return
 	}
-	argScope := &fullyQualifiedVariable{&proc.Variable{Name: "Arguments", Children: slicePtrVarToSliceVar(args)}, "", true}
+	argScope := &fullyQualifiedVariable{api.Variable{Name: "Arguments", Children: args}, "", true}
 
 	// Retrieve local variables
-	locals, err := s.debugger.LocalVariables(goid, frame, 0, DefaultLoadConfig)
+	locals, err := s.session.client.ListLocalVariables(api.EvalScope{GoroutineID: goid, Frame: frame}, DefaultLoadConfig)
 	if err != nil {
 		s.sendErrorResponse(request.Request, UnableToListLocals, "Unable to list locals", err.Error())
 		return
 	}
-	locScope := &fullyQualifiedVariable{&proc.Variable{Name: "Locals", Children: slicePtrVarToSliceVar(locals)}, "", true}
+	locScope := &fullyQualifiedVariable{api.Variable{Name: "Locals", Children: locals}, "", true}
 
 	// TODO(polina): Annotate shadowed variables
 
@@ -869,13 +954,14 @@ func (s *Server) onScopesRequest(request *dap.ScopesRequest) {
 		// scope is expanded, generating an explicit variable request,
 		// should we consider making all globals accessible with a scope per package?
 		// Or users can just rely on watch variables.
-		currPkg, err := s.debugger.CurrentPackage()
+		//globals, err := s.session.client.ListPackageVariables(
+		currPkg, err := s.session.client.CurrentPackage()
 		if err != nil {
 			s.sendErrorResponse(request.Request, UnableToListGlobals, "Unable to list globals", err.Error())
 			return
 		}
 		currPkgFilter := fmt.Sprintf("^%s\\.", currPkg)
-		globals, err := s.debugger.PackageVariables(currPkgFilter, DefaultLoadConfig)
+		globals, err := s.session.client.ListPackageVariables(currPkgFilter, DefaultLoadConfig)
 		if err != nil {
 			s.sendErrorResponse(request.Request, UnableToListGlobals, "Unable to list globals", err.Error())
 			return
@@ -886,9 +972,9 @@ func (s *Server) onScopesRequest(request *dap.ScopesRequest) {
 			globals[i].Name = strings.TrimPrefix(g.Name, currPkg+".")
 		}
 
-		globScope := &fullyQualifiedVariable{&proc.Variable{
+		globScope := &fullyQualifiedVariable{api.Variable{
 			Name:     fmt.Sprintf("Globals (package %s)", currPkg),
-			Children: slicePtrVarToSliceVar(globals),
+			Children: globals,
 		}, currPkg, true}
 		scopeGlobals := dap.Scope{Name: globScope.Name, VariablesReference: s.variableHandles.create(globScope)}
 		scopes = append(scopes, scopeGlobals)
@@ -924,23 +1010,23 @@ func (s *Server) onVariablesRequest(request *dap.VariablesRequest) {
 			// A map will have twice as many children as there are key-value elements.
 			kvIndex := i / 2
 			// Process children in pairs: even indices are map keys, odd indices are values.
-			keyv, valv := &v.Children[i], &v.Children[i+1]
-			keyexpr := fmt.Sprintf("(*(*%q)(%#x))", keyv.TypeString(), keyv.Addr)
+			keyv, valv := v.Children[i], v.Children[i+1]
+			keyexpr := fmt.Sprintf("(*(*%q)(%#x))", keyv.Type, keyv.Addr)
 			valexpr := fmt.Sprintf("%s[%s]", v.fullyQualifiedNameOrExpr, keyexpr)
 			switch keyv.Kind {
 			// For value expression, use the key value, not the corresponding expression if the key is a scalar.
 			case reflect.Bool, reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128,
 				reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 				reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-				valexpr = fmt.Sprintf("%s[%s]", v.fullyQualifiedNameOrExpr, api.VariableValueAsString(keyv))
+				valexpr = fmt.Sprintf("%s[%s]", v.fullyQualifiedNameOrExpr, keyv.Value)
 			case reflect.String:
-				if key := constant.StringVal(keyv.Value); keyv.Len == int64(len(key)) { // fully loaded
+				if key := keyv.Value; keyv.Len == int64(len(key)) { // fully loaded
 					valexpr = fmt.Sprintf("%s[%q]", v.fullyQualifiedNameOrExpr, key)
 				}
 				// TODO(polina): use nil for nil keys of different types
 			}
-			key, keyref := s.convertVariable(keyv, keyexpr)
-			val, valref := s.convertVariable(valv, valexpr)
+			key, keyref := s.convertVariable(&keyv, keyexpr)
+			val, valref := s.convertVariable(&valv, valexpr)
 			// If key or value or both are scalars, we can use
 			// a single variable to represet key:value format.
 			// Otherwise, we must return separate variables for both.
@@ -1029,29 +1115,32 @@ func (s *Server) onVariablesRequest(request *dap.VariablesRequest) {
 // variables request can be issued to get the elements of the compound variable. As a
 // custom, a zero reference, reminiscent of a zero pointer, is used to indicate that
 // a scalar variable cannot be "dereferenced" to get its elements (as there are none).
-func (s *Server) convertVariable(v *proc.Variable, qualifiedNameOrExpr string) (value string, variablesReference int) {
+func (s *Server) convertVariable(v *api.Variable, qualifiedNameOrExpr string) (value string, variablesReference int) {
 	return s.convertVariableWithOpts(v, qualifiedNameOrExpr, false)
 }
 
-func (s *Server) convertVariableToString(v *proc.Variable) string {
+func (s *Server) convertVariableToString(v *api.Variable) string {
 	val, _ := s.convertVariableWithOpts(v, "", true)
 	return val
 }
 
 // convertVariableWithOpts allows to skip reference generation in case all we need is
 // a string representation of the variable.
-func (s *Server) convertVariableWithOpts(v *proc.Variable, qualifiedNameOrExpr string, skipRef bool) (value string, variablesReference int) {
-	maybeCreateVariableHandle := func(v *proc.Variable) int {
+func (s *Server) convertVariableWithOpts(v *api.Variable, qualifiedNameOrExpr string, skipRef bool) (value string, variablesReference int) {
+	maybeCreateVariableHandle := func(v *api.Variable) int {
 		if skipRef {
 			return 0
 		}
-		return s.variableHandles.create(&fullyQualifiedVariable{v, qualifiedNameOrExpr, false /*not a scope*/})
+		return s.variableHandles.create(&fullyQualifiedVariable{*v, qualifiedNameOrExpr, false /*not a scope*/})
 	}
-	if v.Unreadable != nil {
+	if v.Unreadable != "" {
 		value = fmt.Sprintf("unreadable <%v>", v.Unreadable)
 		return
 	}
-	typeName := api.PrettyTypeName(v.DwarfType)
+	// From service/api.ConvertVar
+	// 	 r.Type = PrettyTypeName(v.DwarfType)
+	//   r.RealType = PrettyTypeName(v.RealType)
+	typeName := v.Type
 
 	// As per https://github.com/go-delve/delve/blob/master/Documentation/api/ClientHowto.md#looking-into-variables,
 	// some of the types might be fully or partially not loaded based on LoadConfig. For now, clearly
@@ -1065,7 +1154,7 @@ func (s *Server) convertVariableWithOpts(v *proc.Variable, qualifiedNameOrExpr s
 			value = fmt.Sprintf("unsafe.Pointer(%#x)", v.Children[0].Addr)
 		}
 	case reflect.Ptr:
-		if v.DwarfType == nil || len(v.Children) == 0 {
+		if v.Type == "" || len(v.Children) == 0 {
 			value = "nil"
 		} else if v.Children[0].Addr == 0 {
 			value = "nil <" + typeName + ">"
@@ -1117,7 +1206,7 @@ func (s *Server) convertVariableWithOpts(v *proc.Variable, qualifiedNameOrExpr s
 			}
 		}
 	case reflect.String:
-		vvalue := constant.StringVal(v.Value)
+		vvalue := v.Value
 		lenNotLoaded := v.Len - int64(len(vvalue))
 		if lenNotLoaded > 0 { // Not fully loaded
 			vvalue += fmt.Sprintf("...+%d more", lenNotLoaded)
@@ -1142,10 +1231,10 @@ func (s *Server) convertVariableWithOpts(v *proc.Variable, qualifiedNameOrExpr s
 			value = "nil <" + typeName + ">"
 		} else {
 			if v.Children[0].OnlyAddr { // Not fully loaded
-				value = "<" + typeName + "(" + v.Children[0].TypeString() + ")" + ">" + " (data not loaded)"
+				value = "<" + typeName + "(" + v.Children[0].Type + ")" + ">" + " (data not loaded)"
 				// Since child is not fully loaded, don't provide a reference to view it.
 			} else {
-				value = "<" + typeName + "(" + v.Children[0].TypeString() + ")" + ">"
+				value = "<" + typeName + "(" + v.Children[0].Type + ")" + ">"
 				// TODO(polina): should we remove one level of indirection and skip "data"?
 				// Then we will have:
 				//   Before:
@@ -1172,22 +1261,8 @@ func (s *Server) convertVariableWithOpts(v *proc.Variable, qualifiedNameOrExpr s
 		if len(v.Children) > 0 {
 			variablesReference = maybeCreateVariableHandle(v)
 		}
-	case reflect.Complex64, reflect.Complex128:
-		v.Children = make([]proc.Variable, 2)
-		v.Children[0].Name = "real"
-		v.Children[0].Value = constant.Real(v.Value)
-		v.Children[1].Name = "imaginary"
-		v.Children[1].Value = constant.Imag(v.Value)
-		if v.Kind == reflect.Complex64 {
-			v.Children[0].Kind = reflect.Float32
-			v.Children[1].Kind = reflect.Float32
-		} else {
-			v.Children[0].Kind = reflect.Float64
-			v.Children[1].Kind = reflect.Float64
-		}
-		fallthrough
 	default: // complex, scalar
-		vvalue := api.VariableValueAsString(v)
+		vvalue := v.Value
 		if vvalue != "" {
 			value = vvalue
 		} else {
@@ -1197,8 +1272,14 @@ func (s *Server) convertVariableWithOpts(v *proc.Variable, qualifiedNameOrExpr s
 			variablesReference = maybeCreateVariableHandle(v)
 		}
 	}
-	return
+	return value, variablesReference
 }
+
+// TODO(polina): Support config settings via launch/attach args vs auto-loading?
+var (
+	apiCfg = &api.LoadConfig{FollowPointers: true, MaxVariableRecurse: 1, MaxStringLen: 64, MaxArrayValues: 64, MaxStructFields: -1}
+	prcCfg = proc.LoadConfig{FollowPointers: true, MaxVariableRecurse: 1, MaxStringLen: 64, MaxArrayValues: 64, MaxStructFields: -1}
+)
 
 // onEvaluateRequest handles 'evalute' requests.
 // This is a mandatory request to support.
@@ -1210,7 +1291,7 @@ func (s *Server) convertVariableWithOpts(v *proc.Variable, qualifiedNameOrExpr s
 // -- print {expression} - return the result as a string like from dlv cli
 func (s *Server) onEvaluateRequest(request *dap.EvaluateRequest) {
 	showErrorToUser := request.Arguments.Context != "watch"
-	if s.debugger == nil {
+	if s.session == nil {
 		s.sendErrorResponseWithOpts(request.Request, UnableToEvaluateExpression, "Unable to evaluate expression", "debugger is nil", showErrorToUser)
 		return
 	}
@@ -1235,19 +1316,14 @@ func (s *Server) onEvaluateRequest(request *dap.EvaluateRequest) {
 			s.sendErrorResponseWithOpts(request.Request, UnableToEvaluateExpression, "Unable to evaluate expression", "call is only supported with topmost stack frame", showErrorToUser)
 			return
 		}
-		stateBeforeCall, err := s.debugger.State( /*nowait*/ true)
+		stateBeforeCall, err := s.session.client.GetStateNonBlocking()
 		if err != nil {
 			s.sendErrorResponseWithOpts(request.Request, UnableToEvaluateExpression, "Unable to evaluate expression", err.Error(), showErrorToUser)
 			return
 		}
-		state, err := s.debugger.Command(&api.DebuggerCommand{
-			Name:                 api.Call,
-			ReturnInfoLoadConfig: api.LoadConfigFromProc(&DefaultLoadConfig),
-			Expr:                 strings.Replace(request.Arguments.Expression, "call ", "", 1),
-			UnsafeCall:           false,
-			GoroutineID:          goid,
-		})
-		if _, isexited := err.(proc.ErrProcessExited); isexited || err == nil && state.Exited {
+		expr := strings.Replace(request.Arguments.Expression, "call ", "", 1)
+		state, err := s.session.client.Call(goid, expr, true)
+		if isProgramExitedError(err) || err == nil && state.Exited {
 			e := &dap.TerminatedEvent{Event: *newEvent("terminated")}
 			s.send(e)
 			return
@@ -1260,16 +1336,12 @@ func (s *Server) onEvaluateRequest(request *dap.EvaluateRequest) {
 		// return to the original stopped line with return values. However,
 		// it is not guaranteed to be selected due to the possibility of the
 		// of simultaenous breakpoints. Therefore, we check all threads.
-		var retVars []*proc.Variable
+		var retVars []api.Variable
 		for _, t := range state.Threads {
 			if t.GoroutineID == stateBeforeCall.SelectedGoroutine.ID &&
 				t.Line == stateBeforeCall.SelectedGoroutine.CurrentLoc.Line && t.CallReturn {
 				// The call completed. Get the return values.
-				retVars, err = s.debugger.FindThreadReturnValues(t.ID, DefaultLoadConfig)
-				if err != nil {
-					s.sendErrorResponseWithOpts(request.Request, UnableToEvaluateExpression, "Unable to evaluate expression", err.Error(), showErrorToUser)
-					return
-				}
+				retVars = t.ReturnValues
 				break
 			}
 		}
@@ -1282,7 +1354,7 @@ func (s *Server) onEvaluateRequest(request *dap.EvaluateRequest) {
 			if state.SelectedGoroutine != nil {
 				stopped.Body.ThreadId = state.SelectedGoroutine.ID
 			}
-			stopped.Body.Reason = s.debugger.StopReason().String()
+			stopped.Body.Reason = state.StopReason
 			s.send(stopped)
 			// TODO(polina): once this is asynchronous, we could wait to reply until the user
 			// continues, call ends, original stop point is hit and return values are available.
@@ -1293,11 +1365,11 @@ func (s *Server) onEvaluateRequest(request *dap.EvaluateRequest) {
 		if len(retVars) > 0 {
 			// Package one or more return values in a single scope-like nameless variable
 			// that preserves their names.
-			retVarsAsVar := &proc.Variable{Children: slicePtrVarToSliceVar(retVars)}
+			retVarsAsVar := api.Variable{Children: retVars}
 			// As a shortcut also express the return values as a single string.
 			retVarsAsStr := ""
 			for _, v := range retVars {
-				retVarsAsStr += s.convertVariableToString(v) + ", "
+				retVarsAsStr += s.convertVariableToString(&v) + ", "
 			}
 			response.Body = dap.EvaluateResponseBody{
 				Result:             strings.TrimRight(retVarsAsStr, ", "),
@@ -1305,7 +1377,10 @@ func (s *Server) onEvaluateRequest(request *dap.EvaluateRequest) {
 			}
 		}
 	} else { // {expression}
-		exprVar, err := s.debugger.EvalVariableInScope(goid, frame, 0, request.Arguments.Expression, DefaultLoadConfig)
+		exprVar, err := s.session.client.EvalVariable(api.EvalScope{
+			GoroutineID: goid,
+			Frame:       frame,
+		}, request.Arguments.Expression, *apiCfg)
 		if err != nil {
 			s.sendErrorResponseWithOpts(request.Request, UnableToEvaluateExpression, "Unable to evaluate expression", err.Error(), showErrorToUser)
 			return
@@ -1464,12 +1539,12 @@ func (s *Server) resetHandlesForStop() {
 // termination, error, breakpoint, etc, when an appropriate
 // event needs to be sent to the client.
 func (s *Server) doCommand(command string) {
-	if s.debugger == nil {
+	if s.session == nil {
 		return
 	}
 
-	state, err := s.debugger.Command(&api.DebuggerCommand{Name: command})
-	if _, isexited := err.(proc.ErrProcessExited); isexited || err == nil && state.Exited {
+	state, err := s.doCommandDemux(&api.DebuggerCommand{Name: command})
+	if isProgramExitedError(err) || state.Exited {
 		e := &dap.TerminatedEvent{Event: *newEvent("terminated")}
 		s.send(e)
 		return
@@ -1484,8 +1559,8 @@ func (s *Server) doCommand(command string) {
 			stopped.Body.ThreadId = state.SelectedGoroutine.ID
 		}
 
-		switch s.debugger.StopReason() {
-		case proc.StopNextFinished:
+		switch state.StopReason {
+		case proc.StopNextFinished.String():
 			stopped.Body.Reason = "step"
 		default:
 			stopped.Body.Reason = "breakpoint"
@@ -1507,7 +1582,7 @@ func (s *Server) doCommand(command string) {
 		if stopped.Body.Text == "bad access" {
 			stopped.Body.Text = BetterBadAccessError
 		}
-		state, err := s.debugger.State( /*nowait*/ true)
+		state, err := s.session.client.GetStateNonBlocking()
 		if err == nil {
 			stopped.Body.ThreadId = state.CurrentThread.GoroutineID
 		}
@@ -1526,4 +1601,45 @@ func (s *Server) doCommand(command string) {
 				Category: "stderr",
 			}})
 	}
+}
+
+// Command handles commands which control the debugger lifecycle
+func (s *Server) doCommandDemux(command *api.DebuggerCommand) (*api.DebuggerState, error) {
+	switch command.Name {
+	case api.Continue:
+		s := <-s.session.client.Continue()
+		return s, s.Err
+	case api.DirectionCongruentContinue:
+		s := <-s.session.client.DirectionCongruentContinue()
+		return s, s.Err
+	case api.Call:
+		panic("not implemented")
+	case api.Rewind:
+		s := <-s.session.client.Rewind()
+		return s, s.Err
+	case api.Next:
+		return s.session.client.Next()
+	case api.ReverseNext:
+		return s.session.client.ReverseNext()
+	case api.Step:
+		return s.session.client.Step()
+	case api.ReverseStep:
+		return s.session.client.ReverseStep()
+	case api.StepInstruction:
+		return s.session.client.StepInstruction()
+	case api.ReverseStepInstruction:
+		return s.session.client.ReverseStepInstruction()
+	case api.StepOut:
+		return s.session.client.StepOut()
+	case api.ReverseStepOut:
+		return s.session.client.ReverseStepOut()
+	case api.SwitchThread:
+		return s.session.client.SwitchThread(command.ThreadID)
+	case api.SwitchGoroutine:
+		return s.session.client.SwitchGoroutine(command.GoroutineID)
+	case api.Halt:
+		return s.session.client.Halt()
+	}
+
+	return nil, fmt.Errorf("unimplemented command %q", command.Name)
 }
