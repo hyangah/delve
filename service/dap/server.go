@@ -804,6 +804,7 @@ func (s *Server) onLaunchRequest(request *dap.LaunchRequest) {
 		}
 
 		buildFlags := args.BuildFlags
+		buildDir := args.BuildDir
 
 		var cmd string
 		var out []byte
@@ -811,9 +812,9 @@ func (s *Server) onLaunchRequest(request *dap.LaunchRequest) {
 		s.log.Debugf("building binary '%s' from '%s' with flags '%v'", debugbinary, program, buildFlags)
 		switch mode {
 		case "debug":
-			cmd, out, err = gobuild.GoBuildCombinedOutput(debugbinary, []string{program}, buildFlags)
+			cmd, out, err = gobuild.GoBuildCombinedOutput(debugbinary, []string{program}, buildFlags, buildDir)
 		case "test":
-			cmd, out, err = gobuild.GoTestBuildCombinedOutput(debugbinary, []string{program}, buildFlags)
+			cmd, out, err = gobuild.GoTestBuildCombinedOutput(debugbinary, []string{program}, buildFlags, buildDir)
 		}
 		if err != nil {
 			s.send(&dap.OutputEvent{

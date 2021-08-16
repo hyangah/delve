@@ -87,8 +87,12 @@ type LaunchConfig struct {
 	// Absolute path to the working directory of the program being debugged
 	// if a non-empty value is specified. If not specified or empty,
 	// the program or the program's directory will be used.
-	// This is similar to delve's `--wd` flag.
 	Cwd string `json:"cwd,omitempty"`
+
+	// Absolute path to the build directory from which the program to be
+	// debugged will be built. If not specified or empty, the directory
+	// `dlv` started with will be used.
+	BuildDir string `json:"buildDir,omitempty"`
 
 	// Build flags, to be passed to the Go compiler.
 	// For example, "-tags=integration -mod=vendor -cover -v" like delve's `--build-flags`.
