@@ -94,8 +94,10 @@ type LaunchConfig struct {
 	// This is similar to delve's `--wd` flag.
 	Cwd string `json:"cwd,omitempty"`
 
-	// Absolute path to the build directory from which the program to be
-	// debugged will be built. If not specified or empty, the directory
+	// Path to the build directory from which the program to be
+	// debugged will be built. Relative paths will be interpreted
+	// as the paths relative to the delve process's working directory.
+	// If not specified or empty, the directory
 	// `dlv` started with will be used.
 	BuildDir string `json:"buildDir,omitempty"`
 
