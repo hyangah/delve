@@ -4,6 +4,32 @@ package minidump
 
 import "strconv"
 
+func _() {
+	// An "invalid array index" compiler error signifies that the constant values have changed.
+	// Re-run the stringer command to generate them again.
+	var x [1]struct{}
+	_ = x[FileNormal-0]
+	_ = x[FileWithDataSegs-1]
+	_ = x[FileWithFullMemory-2]
+	_ = x[FileWithHandleData-4]
+	_ = x[FileFilterMemory-8]
+	_ = x[FileScanMemory-16]
+	_ = x[FileWithUnloadedModules-32]
+	_ = x[FileWithIncorrectlyReferencedMemory-64]
+	_ = x[FileFilterModulePaths-128]
+	_ = x[FileWithProcessThreadData-256]
+	_ = x[FileWithPrivateReadWriteMemory-512]
+	_ = x[FileWithoutOptionalData-1024]
+	_ = x[FileWithFullMemoryInfo-2048]
+	_ = x[FileWithThreadInfo-4096]
+	_ = x[FileWithCodeSegs-8192]
+	_ = x[FileWithoutAuxilliarySegs-16384]
+	_ = x[FileWithFullAuxilliaryState-32768]
+	_ = x[FileWithPrivateCopyMemory-65536]
+	_ = x[FileIgnoreInaccessibleMemory-131072]
+	_ = x[FileWithTokenInformation-262144]
+}
+
 const _FileFlags_name = "FileNormalFileWithDataSegsFileWithFullMemoryFileWithHandleDataFileFilterMemoryFileScanMemoryFileWithUnloadedModulesFileWithIncorrectlyReferencedMemoryFileFilterModulePathsFileWithProcessThreadDataFileWithPrivateReadWriteMemoryFileWithoutOptionalDataFileWithFullMemoryInfoFileWithThreadInfoFileWithCodeSegsFileWithoutAuxilliarySegsFileWithFullAuxilliaryStateFileWithPrivateCopyMemoryFileIgnoreInaccessibleMemoryFileWithTokenInformation"
 
 var _FileFlags_map = map[FileFlags]string{
@@ -35,6 +61,34 @@ func (i FileFlags) String() string {
 	}
 	return "FileFlags(" + strconv.FormatInt(int64(i), 10) + ")"
 }
+func _() {
+	// An "invalid array index" compiler error signifies that the constant values have changed.
+	// Re-run the stringer command to generate them again.
+	var x [1]struct{}
+	_ = x[UnusedStream-0]
+	_ = x[ReservedStream0-1]
+	_ = x[ReservedStream1-2]
+	_ = x[ThreadListStream-3]
+	_ = x[ModuleListStream-4]
+	_ = x[MemoryListStream-5]
+	_ = x[ExceptionStream-6]
+	_ = x[SystemInfoStream-7]
+	_ = x[ThreadExListStream-8]
+	_ = x[Memory64ListStream-9]
+	_ = x[CommentStreamA-10]
+	_ = x[CommentStreamW-11]
+	_ = x[HandleDataStream-12]
+	_ = x[FunctionTableStream-13]
+	_ = x[UnloadedModuleStream-14]
+	_ = x[MiscInfoStream-15]
+	_ = x[MemoryInfoListStream-16]
+	_ = x[ThreadInfoListStream-17]
+	_ = x[HandleOperationListStream-18]
+	_ = x[TokenStream-19]
+	_ = x[JavascriptDataStream-20]
+	_ = x[SystemMemoryInfoStream-21]
+	_ = x[ProcessVMCounterStream-22]
+}
 
 const _StreamType_name = "UnusedStreamReservedStream0ReservedStream1ThreadListStreamModuleListStreamMemoryListStreamExceptionStreamSystemInfoStreamThreadExListStreamMemory64ListStreamCommentStreamACommentStreamWHandleDataStreamFunctionTableStreamUnloadedModuleStreamMiscInfoStreamMemoryInfoListStreamThreadInfoListStreamHandleOperationListStreamTokenStreamJavascriptDataStreamSystemMemoryInfoStreamProcessVMCounterStream"
 
@@ -45,6 +99,24 @@ func (i StreamType) String() string {
 		return "StreamType(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
 	return _StreamType_name[_StreamType_index[i]:_StreamType_index[i+1]]
+}
+func _() {
+	// An "invalid array index" compiler error signifies that the constant values have changed.
+	// Re-run the stringer command to generate them again.
+	var x [1]struct{}
+	_ = x[CpuArchitectureX86-0]
+	_ = x[CpuArchitectureMips-1]
+	_ = x[CpuArchitectureAlpha-2]
+	_ = x[CpuArchitecturePPC-3]
+	_ = x[CpuArchitectureSHX-4]
+	_ = x[CpuArchitectureARM-5]
+	_ = x[CpuArchitectureIA64-6]
+	_ = x[CpuArchitectureAlpha64-7]
+	_ = x[CpuArchitectureMSIL-8]
+	_ = x[CpuArchitectureAMD64-9]
+	_ = x[CpuArchitectureWoW64-10]
+	_ = x[CpuArchitectureARM64-12]
+	_ = x[CpuArchitectureUnknown-65535]
 }
 
 const (
@@ -69,6 +141,14 @@ func (i Arch) String() string {
 		return "Arch(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
 }
+func _() {
+	// An "invalid array index" compiler error signifies that the constant values have changed.
+	// Re-run the stringer command to generate them again.
+	var x [1]struct{}
+	_ = x[MemoryStateCommit-4096]
+	_ = x[MemoryStateReserve-8192]
+	_ = x[MemoryStateFree-65536]
+}
 
 const (
 	_MemoryState_name_0 = "MemoryStateCommit"
@@ -88,6 +168,14 @@ func (i MemoryState) String() string {
 		return "MemoryState(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
 }
+func _() {
+	// An "invalid array index" compiler error signifies that the constant values have changed.
+	// Re-run the stringer command to generate them again.
+	var x [1]struct{}
+	_ = x[MemoryTypePrivate-131072]
+	_ = x[MemoryTypeMapped-262144]
+	_ = x[MemoryTypeImage-16777216]
+}
 
 const (
 	_MemoryType_name_0 = "MemoryTypePrivate"
@@ -106,6 +194,22 @@ func (i MemoryType) String() string {
 	default:
 		return "MemoryType(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
+}
+func _() {
+	// An "invalid array index" compiler error signifies that the constant values have changed.
+	// Re-run the stringer command to generate them again.
+	var x [1]struct{}
+	_ = x[MemoryProtectNoAccess-1]
+	_ = x[MemoryProtectReadOnly-2]
+	_ = x[MemoryProtectReadWrite-4]
+	_ = x[MemoryProtectWriteCopy-8]
+	_ = x[MemoryProtectExecute-16]
+	_ = x[MemoryProtectExecuteRead-32]
+	_ = x[MemoryProtectExecuteReadWrite-64]
+	_ = x[MemoryProtectExecuteWriteCopy-128]
+	_ = x[MemoryProtectPageGuard-256]
+	_ = x[MemoryProtectNoCache-512]
+	_ = x[MemoryProtectWriteCombine-1024]
 }
 
 const (

@@ -18,7 +18,7 @@ func must(err error, fmtstr string, args ...interface{}) {
 }
 
 func usage() {
-	os.Stderr.WriteString("gen-faq-to input-path output-path")
+	os.Stderr.WriteString("gen-faq-toc input-path output-path")
 	os.Exit(1)
 }
 

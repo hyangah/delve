@@ -904,6 +904,24 @@ func (c *Client) CheckStackTraceResponse(t *testing.T, m dap.Message) *dap.Stack
 	return r
 }
 
+// ExpectStartDebuggingResponse reads a protocol message from the connection
+// and fails the test if the read message is not *StartDebuggingResponse.
+func (c *Client) ExpectStartDebuggingResponse(t *testing.T) *dap.StartDebuggingResponse {
+	t.Helper()
+	m := c.ExpectMessage(t)
+	return c.CheckStartDebuggingResponse(t, m)
+}
+
+// CheckStartDebuggingResponse fails the test if m is not *StartDebuggingResponse.
+func (c *Client) CheckStartDebuggingResponse(t *testing.T, m dap.Message) *dap.StartDebuggingResponse {
+	t.Helper()
+	r, ok := m.(*dap.StartDebuggingResponse)
+	if !ok {
+		t.Fatalf("got %#v, want *dap.StartDebuggingResponse", m)
+	}
+	return r
+}
+
 // ExpectStepBackResponse reads a protocol message from the connection
 // and fails the test if the read message is not *StepBackResponse.
 func (c *Client) ExpectStepBackResponse(t *testing.T) *dap.StepBackResponse {
